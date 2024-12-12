@@ -9,6 +9,11 @@ const { string, integer, assert } = require('superstruct');
 assert(process.env.MONGO_URI, string());
 assert(parseFloat(process.env.DEFAULT_BATCH_SIZE), integer());
 
+const STATUS = {
+  SUCCESS: 'success',
+  ERROR: 'error'
+};
+
 mongoose.connect(process.env.MONGO_URI);
 
 const ImageSchema = new mongoose.Schema({
@@ -19,7 +24,7 @@ const ImageSchema = new mongoose.Schema({
   status: { 
       type: String, 
       required: true,
-      enum: ['success', 'error'],
+      enum: Object.values(STATUS),
       index: true
   },
   errorMessage: { type: String }
@@ -27,14 +32,28 @@ const ImageSchema = new mongoose.Schema({
 
 const ImageModel = mongoose.model('Image', ImageSchema);
 
+const CONFIG = {
+  HTTP_TIMEOUT: 30000,
+  MAX_FILE_SIZE: 120 * 1024 * 1024, // 120MB  
+  DEFAULT_BATCH_SIZE: parseInt(process.env.DEFAULT_BATCH_SIZE, 10),
+  THUMBNAIL_WIDTH: 100,
+  THUMBNAIL_HEIGHT: 100,
+};
+
 class ImageProcessor {
-    constructor() {
-        this.logger = console;
+    constructor(options = {}) {
+        this.logger = options.logger || console;
         this.processedCount = 0;
+        this.errorCount = 0;
+        
+        this.axiosInstance = axios.create({
+            timeout: CONFIG.HTTP_TIMEOUT,
+            maxContentLength: CONFIG.MAX_FILE_SIZE,
+        });
     }
 
     async start() {
-        const batchSize = parseInt(process.env.DEFAULT_BATCH_SIZE, 10);
+        const batchSize = CONFIG.DEFAULT_BATCH_SIZE;
         const filePath = path.join(__dirname, `data/data.csv`);
         
         this.logger.info(`Batch size: ${batchSize}`);
@@ -96,9 +115,9 @@ class ImageProcessor {
 
     async createThumbnail(rawEntity) {
       try {
-          const response = await axios.get(rawEntity.url, { responseType: 'arraybuffer' });
+          const response = await this.axiosInstance.get(rawEntity.url, { responseType: 'arraybuffer' });
           const buffer = await sharp(response.data)
-              .resize(100, 100)
+              .resize(CONFIG.THUMBNAIL_WIDTH, CONFIG.THUMBNAIL_HEIGHT)
               .toBuffer();
   
           return {
