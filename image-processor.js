@@ -71,6 +71,16 @@ class ImageProcessor {
             }));
 
         for await (const record of parser) {
+            if (! await this.validateRecord(record)) {
+                this.logger.warn({
+                    message: 'Invalid record skipped',
+                    record,
+                    reason: 'Validation failed'
+                });
+
+                continue;
+            }
+
             currentBatch.push({
                 index: parseInt(record.index, 10),
                 id: record.id,
@@ -97,6 +107,19 @@ class ImageProcessor {
             mongoose.connection.on('connected', resolve);
             mongoose.connection.on('error', reject);
         });
+    }
+
+    async validateRecord(record) {
+        try {
+            assert(parseInt(record.index, 10), integer());
+            assert(record.id, string());
+            assert(record.url, string());
+            new URL(record.url);
+        } catch {
+            return false;
+        }
+
+        return true;
     }
 
     async processBatch(batch) {
