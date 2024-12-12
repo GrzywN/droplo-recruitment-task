@@ -38,6 +38,8 @@ const CONFIG = {
   DEFAULT_BATCH_SIZE: parseInt(process.env.DEFAULT_BATCH_SIZE, 10),
   THUMBNAIL_WIDTH: 100,
   THUMBNAIL_HEIGHT: 100,
+  RETRY_ATTEMPTS: 3,
+  RETRY_DELAY: 1000,
 };
 
 class ImageProcessor {
@@ -145,13 +147,13 @@ class ImageProcessor {
         return Promise.all(tasks);
     }
 
-    async createThumbnail(rawEntity) {
+    async createThumbnail(rawEntity, retries = CONFIG.RETRY_ATTEMPTS || 3) {
       try {
           const response = await this.axiosInstance.get(rawEntity.url, { responseType: 'arraybuffer' });
           const buffer = await sharp(response.data)
               .resize(CONFIG.THUMBNAIL_WIDTH, CONFIG.THUMBNAIL_HEIGHT)
               .toBuffer();
-  
+
           return {
               _id: rawEntity.id,
               index: rawEntity.index,
@@ -160,7 +162,17 @@ class ImageProcessor {
               processedAt: new Date()
           };
       } catch (error) {
+          if (retries > 0) {
+              this.logger.warn(`Retrying thumbnail creation for ID ${rawEntity.id}. Retries left: ${retries - 1}`);
+              
+              await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY || 1000));
+              
+              return this.createThumbnail(rawEntity, retries - 1);
+          }
+
           this.logger.error(`Error creating thumbnail for ID ${rawEntity.id}: ${error.message}`);
+          this.errorCount++;
+
           return {
               _id: rawEntity.id,
               index: rawEntity.index,
@@ -170,7 +182,7 @@ class ImageProcessor {
               errorMessage: error.message
           };
       }
-  }
+    }
 }
 
 module.exports = ImageProcessor;
