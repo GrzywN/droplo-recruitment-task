@@ -53,6 +53,8 @@ class ImageProcessor {
     }
 
     async start() {
+        await this.validateConnection();  
+      
         const batchSize = CONFIG.DEFAULT_BATCH_SIZE;
         const filePath = path.join(__dirname, `data/data.csv`);
         
@@ -88,6 +90,13 @@ class ImageProcessor {
         }
 
         this.logger.info(`Processing completed. Total processed: ${this.processedCount}`);
+    }
+
+    async validateConnection() {
+        return new Promise((resolve, reject) => {
+            mongoose.connection.on('connected', resolve);
+            mongoose.connection.on('error', reject);
+        });
     }
 
     async processBatch(batch) {
