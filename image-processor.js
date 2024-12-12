@@ -12,10 +12,18 @@ assert(parseFloat(process.env.DEFAULT_BATCH_SIZE), integer());
 mongoose.connect(process.env.MONGO_URI);
 
 const ImageSchema = new mongoose.Schema({
-    id: { type: String, required: true },
-    index: { type: Number, required: true },
-    thumbnail: { type: Buffer, required: true },
-});
+  _id: { type: String, required: true },
+  index: { type: Number, required: true, index: true },
+  thumbnail: { type: Buffer, required: true },
+  processedAt: { type: Date, default: Date.now },
+  status: { 
+      type: String, 
+      required: true,
+      enum: ['success', 'error'],
+      index: true
+  },
+  errorMessage: { type: String }
+}, { timestamps: true, _id: false });
 
 const ImageModel = mongoose.model('Image', ImageSchema);
 
@@ -87,20 +95,31 @@ class ImageProcessor {
     }
 
     async createThumbnail(rawEntity) {
-        try {
-            const response = await axios.get(rawEntity.url, { responseType: 'arraybuffer' });
-            const buffer = await sharp(response.data)
-                .resize(100, 100)
-                .toBuffer();
-
-            rawEntity.thumbnail = buffer;
-            delete rawEntity.url;
-            return rawEntity;
-        } catch (error) {
-            this.logger.error(`Error creating thumbnail for ID ${rawEntity.id}: ${error.message}`);
-            return null;
-        }
-    }
+      try {
+          const response = await axios.get(rawEntity.url, { responseType: 'arraybuffer' });
+          const buffer = await sharp(response.data)
+              .resize(100, 100)
+              .toBuffer();
+  
+          return {
+              _id: rawEntity.id,
+              index: rawEntity.index,
+              thumbnail: buffer,
+              status: 'success',
+              processedAt: new Date()
+          };
+      } catch (error) {
+          this.logger.error(`Error creating thumbnail for ID ${rawEntity.id}: ${error.message}`);
+          return {
+              _id: rawEntity.id,
+              index: rawEntity.index,
+              thumbnail: Buffer.from([]),
+              status: 'error',
+              processedAt: new Date(),
+              errorMessage: error.message
+          };
+      }
+  }
 }
 
 module.exports = ImageProcessor;

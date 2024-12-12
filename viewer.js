@@ -10,10 +10,18 @@ const port = 3000;
 mongoose.connect(process.env.MONGO_URI);
 
 const ImageSchema = new mongoose.Schema({
-    id: { type: String, required: true },
-    index: { type: Number, required: true },
-    thumbnail: { type: Buffer, required: true },
-});
+  _id: { type: String, required: true },
+  index: { type: Number, required: true, index: true },
+  thumbnail: { type: Buffer, required: true },
+  processedAt: { type: Date, default: Date.now },
+  status: { 
+      type: String, 
+      required: true,
+      enum: ['success', 'error'],
+      index: true
+  },
+  errorMessage: { type: String }
+}, { timestamps: true, _id: false });
 
 const ImageModel = mongoose.model('Image', ImageSchema);
 
@@ -22,7 +30,7 @@ app.get('/', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
     
-    const images = await ImageModel.find({}, 'id index')
+    const images = await ImageModel.find({}, '_id index')
         .skip(skip)
         .limit(limit)
         .sort('index');
@@ -48,8 +56,8 @@ app.get('/', async (req, res) => {
                 <div class="grid">
                     ${images.map(img => `
                         <div class="image-container">
-                            <img src="/image/${img.id}" width="100" height="100"/>
-                            <div>ID: ${img.id}</div>
+                            <img src="/image/${img._id}" width="100" height="100"/>
+                            <div>ID: ${img._id}</div>
                             <div>Index: ${img.index}</div>
                         </div>
                     `).join('')}
@@ -60,7 +68,7 @@ app.get('/', async (req, res) => {
 });
 
 app.get('/image/:id', async (req, res) => {
-    const image = await ImageModel.findOne({ id: req.params.id });
+    const image = await ImageModel.findOne({ _id: req.params.id });
     if (!image) {
         return res.status(404).send('Not found');
     }
