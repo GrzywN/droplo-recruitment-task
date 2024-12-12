@@ -88,7 +88,7 @@ class ImageProcessor {
 
       currentBatch.push({
         index: parseInt(record.index, 10),
-        id: record.id,
+        _id: record.id,
         url: record.url,
         thumbnail: null,
       });
@@ -132,21 +132,40 @@ class ImageProcessor {
   async processBatch(batch) {
     try {
       const images = await this.processChunk(batch);
-      await ImageModel.insertMany(
-        images.filter((img) => img !== null),
-        { ordered: false },
-      );
+      const operations = images.map((image) => ({
+        updateOne: {
+          filter: { _id: image._id },
+          update: { $set: image },
+          upsert: true,
+        },
+      }));
 
-      this.processedCount += images.filter((img) => img !== null).length;
-      this.logger.info(`Processed batch size: ${images.length}`);
-      this.logger.info(
-        `Last processed index: ${batch[batch.length - 1].index}, ` +
-          `Last processed ID: ${batch[batch.length - 1].id}`,
-      );
+      const result = await ImageModel.bulkWrite(operations);
 
-      if (global.gc) global.gc();
+      this.processedCount += result.insertedCount + result.modifiedCount;
+      this.logger.info({
+        message: 'Batch processed',
+        batchSize: batch.length,
+        successful: result.insertedCount + result.modifiedCount,
+        lastProcessedIndex: batch[batch.length - 1].index,
+        lastProcessedId: batch[batch.length - 1]._id,
+        totalProcessed: this.processedCount,
+        totalErrors: this.errorCount,
+      });
+
+      // Periodically trigger garbage collection
+      if (this.processedCount % 1000 === 0 && global.gc) {
+        global.gc();
+      }
     } catch (error) {
-      this.logger.error(`Error processing batch: ${error.message}`);
+      this.logger.error({
+        message: 'Batch processing failed',
+        error: error.message,
+        stack: error.stack,
+        batchSize: batch.length,
+        firstId: batch[0]._id,
+        lastId: batch[batch.length - 1]._id,
+      });
     }
   }
 
@@ -167,7 +186,7 @@ class ImageProcessor {
         .toBuffer();
 
       return {
-        _id: rawEntity.id,
+        _id: rawEntity._id,
         index: rawEntity.index,
         thumbnail: buffer,
         status: 'success',
@@ -192,7 +211,7 @@ class ImageProcessor {
       this.errorCount++;
 
       return {
-        _id: rawEntity.id,
+        _id: rawEntity._id,
         index: rawEntity.index,
         thumbnail: Buffer.from([]),
         status: 'error',
