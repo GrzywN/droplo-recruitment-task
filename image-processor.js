@@ -11,30 +11,33 @@ assert(parseFloat(process.env.DEFAULT_BATCH_SIZE), integer());
 
 const STATUS = {
   SUCCESS: 'success',
-  ERROR: 'error'
+  ERROR: 'error',
 };
 
 mongoose.connect(process.env.MONGO_URI);
 
-const ImageSchema = new mongoose.Schema({
-  _id: { type: String, required: true },
-  index: { type: Number, required: true, index: true },
-  thumbnail: { type: Buffer, required: true },
-  processedAt: { type: Date, default: Date.now },
-  status: { 
-      type: String, 
+const ImageSchema = new mongoose.Schema(
+  {
+    _id: { type: String, required: true },
+    index: { type: Number, required: true, index: true },
+    thumbnail: { type: Buffer, required: true },
+    processedAt: { type: Date, default: Date.now },
+    status: {
+      type: String,
       required: true,
       enum: Object.values(STATUS),
-      index: true
+      index: true,
+    },
+    errorMessage: { type: String },
   },
-  errorMessage: { type: String }
-}, { timestamps: true, _id: false });
+  { timestamps: true, _id: false },
+);
 
 const ImageModel = mongoose.model('Image', ImageSchema);
 
 const CONFIG = {
   HTTP_TIMEOUT: 30000,
-  MAX_FILE_SIZE: 120 * 1024 * 1024, // 120MB  
+  MAX_FILE_SIZE: 120 * 1024 * 1024, // 120MB
   DEFAULT_BATCH_SIZE: parseInt(process.env.DEFAULT_BATCH_SIZE, 10),
   THUMBNAIL_WIDTH: 100,
   THUMBNAIL_HEIGHT: 100,
@@ -43,146 +46,161 @@ const CONFIG = {
 };
 
 class ImageProcessor {
-    constructor(options = {}) {
-        this.logger = options.logger || console;
-        this.processedCount = 0;
-        this.errorCount = 0;
-        
-        this.axiosInstance = axios.create({
-            timeout: CONFIG.HTTP_TIMEOUT,
-            maxContentLength: CONFIG.MAX_FILE_SIZE,
+  constructor(options = {}) {
+    this.logger = options.logger || console;
+    this.processedCount = 0;
+    this.errorCount = 0;
+
+    this.axiosInstance = axios.create({
+      timeout: CONFIG.HTTP_TIMEOUT,
+      maxContentLength: CONFIG.MAX_FILE_SIZE,
+    });
+  }
+
+  async start() {
+    await this.validateConnection();
+
+    const batchSize = CONFIG.DEFAULT_BATCH_SIZE;
+    const filePath = path.join(__dirname, `data/data.csv`);
+
+    this.logger.info(`Batch size: ${batchSize}`);
+
+    let currentBatch = [];
+
+    const parser = fs.createReadStream(filePath).pipe(
+      parse({
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+      }),
+    );
+
+    for await (const record of parser) {
+      if (!(await this.validateRecord(record))) {
+        this.logger.warn({
+          message: 'Invalid record skipped',
+          record,
+          reason: 'Validation failed',
         });
-    }
 
-    async start() {
-        await this.validateConnection();  
-      
-        const batchSize = CONFIG.DEFAULT_BATCH_SIZE;
-        const filePath = path.join(__dirname, `data/data.csv`);
-        
-        this.logger.info(`Batch size: ${batchSize}`);
-        
-        let currentBatch = [];
-        
-        const parser = fs
-            .createReadStream(filePath)
-            .pipe(parse({
-                columns: true,
-                skip_empty_lines: true,
-                trim: true
-            }));
+        continue;
+      }
 
-        for await (const record of parser) {
-            if (! await this.validateRecord(record)) {
-                this.logger.warn({
-                    message: 'Invalid record skipped',
-                    record,
-                    reason: 'Validation failed'
-                });
+      currentBatch.push({
+        index: parseInt(record.index, 10),
+        id: record.id,
+        url: record.url,
+        thumbnail: null,
+      });
 
-                continue;
-            }
-
-            currentBatch.push({
-                index: parseInt(record.index, 10),
-                id: record.id,
-                url: record.url,
-                thumbnail: null
-            });
-
-            if (currentBatch.length >= batchSize) {
-                await this.processBatch(currentBatch);
-                currentBatch = [];
-            }
-        }
-
-        // Process any remaining records
-        if (currentBatch.length > 0) {
-            await this.processBatch(currentBatch);
-        }
-
-        this.logger.info(`Processing completed. Total processed: ${this.processedCount}`);
-    }
-
-    async validateConnection() {
-        return new Promise((resolve, reject) => {
-            mongoose.connection.on('connected', resolve);
-            mongoose.connection.on('error', reject);
-        });
-    }
-
-    async validateRecord(record) {
-        try {
-            assert(parseInt(record.index, 10), integer());
-            assert(record.id, string());
-            assert(record.url, string());
-            new URL(record.url);
-        } catch {
-            return false;
-        }
-
-        return true;
-    }
-
-    async processBatch(batch) {
-        try {
-            const images = await this.processChunk(batch);
-            await ImageModel.insertMany(images.filter(img => img !== null), { ordered: false });
-
-            this.processedCount += images.filter(img => img !== null).length;
-            this.logger.info(`Processed batch size: ${images.length}`);
-            this.logger.info(
-                `Last processed index: ${batch[batch.length - 1].index}, ` +
-                `Last processed ID: ${batch[batch.length - 1].id}`
-            );
-
-            if (global.gc) global.gc();
-        } catch (error) {
-            this.logger.error(`Error processing batch: ${error.message}`);
-        }
-    }
-
-    async processChunk(rawEntities) {
-        const tasks = rawEntities.map(rawEntity => this.createThumbnail(rawEntity));
-        return Promise.all(tasks);
-    }
-
-    async createThumbnail(rawEntity, retries = CONFIG.RETRY_ATTEMPTS || 3) {
-      try {
-          const response = await this.axiosInstance.get(rawEntity.url, { responseType: 'arraybuffer' });
-          const buffer = await sharp(response.data)
-              .resize(CONFIG.THUMBNAIL_WIDTH, CONFIG.THUMBNAIL_HEIGHT)
-              .toBuffer();
-
-          return {
-              _id: rawEntity.id,
-              index: rawEntity.index,
-              thumbnail: buffer,
-              status: 'success',
-              processedAt: new Date()
-          };
-      } catch (error) {
-          if (retries > 0) {
-              this.logger.warn(`Retrying thumbnail creation for ID ${rawEntity.id}. Retries left: ${retries - 1}`);
-              
-              await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY || 1000));
-              
-              return this.createThumbnail(rawEntity, retries - 1);
-          }
-
-          this.logger.error(`Error creating thumbnail for ID ${rawEntity.id}: ${error.message}`);
-          this.errorCount++;
-
-          return {
-              _id: rawEntity.id,
-              index: rawEntity.index,
-              thumbnail: Buffer.from([]),
-              status: 'error',
-              processedAt: new Date(),
-              errorMessage: error.message
-          };
+      if (currentBatch.length >= batchSize) {
+        await this.processBatch(currentBatch);
+        currentBatch = [];
       }
     }
+
+    // Process any remaining records
+    if (currentBatch.length > 0) {
+      await this.processBatch(currentBatch);
+    }
+
+    this.logger.info(
+      `Processing completed. Total processed: ${this.processedCount}`,
+    );
+  }
+
+  async validateConnection() {
+    return new Promise((resolve, reject) => {
+      mongoose.connection.on('connected', resolve);
+      mongoose.connection.on('error', reject);
+    });
+  }
+
+  async validateRecord(record) {
+    try {
+      assert(parseInt(record.index, 10), integer());
+      assert(record.id, string());
+      assert(record.url, string());
+      new URL(record.url);
+    } catch {
+      return false;
+    }
+
+    return true;
+  }
+
+  async processBatch(batch) {
+    try {
+      const images = await this.processChunk(batch);
+      await ImageModel.insertMany(
+        images.filter((img) => img !== null),
+        { ordered: false },
+      );
+
+      this.processedCount += images.filter((img) => img !== null).length;
+      this.logger.info(`Processed batch size: ${images.length}`);
+      this.logger.info(
+        `Last processed index: ${batch[batch.length - 1].index}, ` +
+          `Last processed ID: ${batch[batch.length - 1].id}`,
+      );
+
+      if (global.gc) global.gc();
+    } catch (error) {
+      this.logger.error(`Error processing batch: ${error.message}`);
+    }
+  }
+
+  async processChunk(rawEntities) {
+    const tasks = rawEntities.map((rawEntity) =>
+      this.createThumbnail(rawEntity),
+    );
+    return Promise.all(tasks);
+  }
+
+  async createThumbnail(rawEntity, retries = CONFIG.RETRY_ATTEMPTS || 3) {
+    try {
+      const response = await this.axiosInstance.get(rawEntity.url, {
+        responseType: 'arraybuffer',
+      });
+      const buffer = await sharp(response.data)
+        .resize(CONFIG.THUMBNAIL_WIDTH, CONFIG.THUMBNAIL_HEIGHT)
+        .toBuffer();
+
+      return {
+        _id: rawEntity.id,
+        index: rawEntity.index,
+        thumbnail: buffer,
+        status: 'success',
+        processedAt: new Date(),
+      };
+    } catch (error) {
+      if (retries > 0) {
+        this.logger.warn(
+          `Retrying thumbnail creation for ID ${rawEntity.id}. Retries left: ${retries - 1}`,
+        );
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, CONFIG.RETRY_DELAY || 1000),
+        );
+
+        return this.createThumbnail(rawEntity, retries - 1);
+      }
+
+      this.logger.error(
+        `Error creating thumbnail for ID ${rawEntity.id}: ${error.message}`,
+      );
+      this.errorCount++;
+
+      return {
+        _id: rawEntity.id,
+        index: rawEntity.index,
+        thumbnail: Buffer.from([]),
+        status: 'error',
+        processedAt: new Date(),
+        errorMessage: error.message,
+      };
+    }
+  }
 }
 
 module.exports = ImageProcessor;
