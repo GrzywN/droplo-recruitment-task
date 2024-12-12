@@ -18,7 +18,7 @@
   "homepage": "https://github.com/GrzywN/droplo-recruitment-task#readme",
   "dependencies": {
     "axios": "1.7.9",
-    "lodash": "4.17.21",
+    "csv-parse": "5.6.0",
     "mongoose": "8.8.4",
     "sharp": "0.33.5",
     "superstruct": "2.0.2"

@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
+const { parse } = require('csv-parse');
 const { default: axios } = require('axios');
-const { chunk } = require('lodash');
 const sharp = require('sharp');
 const mongoose = require('mongoose');
 const { string, integer, assert } = require('superstruct');
@@ -22,47 +22,67 @@ const ImageModel = mongoose.model('Image', ImageSchema);
 class ImageProcessor {
     constructor() {
         this.logger = console;
+        this.processedCount = 0;
     }
 
     async start() {
         const batchSize = parseInt(process.env.DEFAULT_BATCH_SIZE, 10);
         const filePath = path.join(__dirname, `data/data.csv`);
-        const data = fs.readFileSync(filePath, 'utf-8');
-        const rows = this.parseCSV(data);
-
+        
         this.logger.info(`Batch size: ${batchSize}`);
-        this.logger.info(`Items: ${rows.length}`);
+        
+        let currentBatch = [];
+        
+        const parser = fs
+            .createReadStream(filePath)
+            .pipe(parse({
+                columns: true,
+                skip_empty_lines: true,
+                trim: true
+            }));
 
-        const rawList = rows.map(row => ({
-            index: row.index,
-            id: row.id,
-            url: row.url,
-            thumbnail: null,
-        }));
+        for await (const record of parser) {
+            currentBatch.push({
+                index: parseInt(record.index, 10),
+                id: record.id,
+                url: record.url,
+                thumbnail: null
+            });
 
-        const chunks = chunk(rawList, batchSize);
-
-        this.logger.info("Starting batch...");
-
-        for (const chunk of chunks) {
-            try {
-                const images = await this.processChunk(chunk, batchSize);
-
-                await ImageModel.insertMany(images, { ordered: false });
-
-                this.logger.info(`Processed batch size: ${images.length}`);
-                this.logger.info(`Last processed index: ${chunk[chunk.length - 1].index}, Last processed ID: ${chunk[chunk.length - 1].id}`);
-
-                if (global.gc) global.gc();
-            } catch (error) {
-                this.logger.error(`Error processing batch: ${error.message}`);
+            if (currentBatch.length >= batchSize) {
+                await this.processBatch(currentBatch);
+                currentBatch = [];
             }
+        }
+
+        // Process any remaining records
+        if (currentBatch.length > 0) {
+            await this.processBatch(currentBatch);
+        }
+
+        this.logger.info(`Processing completed. Total processed: ${this.processedCount}`);
+    }
+
+    async processBatch(batch) {
+        try {
+            const images = await this.processChunk(batch);
+            await ImageModel.insertMany(images.filter(img => img !== null), { ordered: false });
+
+            this.processedCount += images.filter(img => img !== null).length;
+            this.logger.info(`Processed batch size: ${images.length}`);
+            this.logger.info(
+                `Last processed index: ${batch[batch.length - 1].index}, ` +
+                `Last processed ID: ${batch[batch.length - 1].id}`
+            );
+
+            if (global.gc) global.gc();
+        } catch (error) {
+            this.logger.error(`Error processing batch: ${error.message}`);
         }
     }
 
-    async processChunk(rawEntities, batchSize) {
+    async processChunk(rawEntities) {
         const tasks = rawEntities.map(rawEntity => this.createThumbnail(rawEntity));
-
         return Promise.all(tasks);
     }
 
@@ -80,18 +100,6 @@ class ImageProcessor {
             this.logger.error(`Error creating thumbnail for ID ${rawEntity.id}: ${error.message}`);
             return null;
         }
-    }
-
-    parseCSV(data) {
-        const rows = data.split('\n');
-        const headers = rows.shift().split(',');
-        return rows.map(row => {
-            const values = row.split(',');
-            return headers.reduce((obj, header, index) => {
-                obj[header.trim()] = values[index]?.trim();
-                return obj;
-            }, {});
-        });
     }
 }
 
