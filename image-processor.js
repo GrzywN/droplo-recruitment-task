@@ -9,7 +9,7 @@ const { string, integer, assert } = require('superstruct');
 assert(process.env.MONGO_URI, string());
 assert(parseFloat(process.env.DEFAULT_BATCH_SIZE), integer());
 
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+mongoose.connect(process.env.MONGO_URI);
 
 const ImageSchema = new mongoose.Schema({
     id: { type: String, required: true },
