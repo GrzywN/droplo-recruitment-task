@@ -57,56 +57,129 @@ class ImageProcessor {
     });
   }
 
-  async start() {
-    await this.validateConnection();
-
-    const batchSize = CONFIG.DEFAULT_BATCH_SIZE;
-    const filePath = path.join(__dirname, `data/data.csv`);
-
-    this.logger.info(`Batch size: ${batchSize}`);
-
-    let currentBatch = [];
-
-    const parser = fs.createReadStream(filePath).pipe(
-      parse({
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-      }),
-    );
-
-    for await (const record of parser) {
-      if (!(await this.validateRecord(record))) {
-        this.logger.warn({
-          message: 'Invalid record skipped',
-          record,
-          reason: 'Validation failed',
-        });
-
-        continue;
+  setupCleanup() {
+    const cleanup = async (signal) => {
+      if (this.isShuttingDown) {
+        return;
       }
 
-      currentBatch.push({
-        index: parseInt(record.index, 10),
-        _id: record.id,
-        url: record.url,
-        thumbnail: null,
+      this.isShuttingDown = true;
+      this.logger.info({
+        message: 'Gracefully shutting down...',
+        signal,
+        processedCount: this.processedCount,
+        errorCount: this.errorCount,
       });
 
-      if (currentBatch.length >= batchSize) {
+      try {
+        await mongoose.connection.close();
+        this.logger.info('MongoDB connection closed');
+
+        process.exit(0);
+      } catch (error) {
+        this.logger.error({
+          message: 'Error during cleanup',
+          error: error.message,
+          stack: error.stack,
+        });
+        process.exit(1);
+      }
+    };
+
+    process.on('SIGTERM', () => cleanup('SIGTERM'));
+    process.on('SIGINT', () => cleanup('SIGINT'));
+
+    process.on('uncaughtException', (error) => {
+      this.logger.error({
+        message: 'Uncaught exception',
+        error: error.message,
+        stack: error.stack,
+      });
+      cleanup('uncaughtException');
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+      this.logger.error({
+        message: 'Unhandled rejection',
+        reason: reason,
+        promise: promise,
+      });
+      cleanup('unhandledRejection');
+    });
+
+    return () => {
+      process.off('SIGTERM', cleanup);
+      process.off('SIGINT', cleanup);
+      process.off('uncaughtException', cleanup);
+      process.off('unhandledRejection', cleanup);
+    };
+  }
+
+  async start() {
+    let cleanup;
+
+    try {
+      cleanup = this.setupCleanup();
+
+      await this.validateConnection();
+
+      const batchSize = CONFIG.DEFAULT_BATCH_SIZE;
+      const filePath = path.join(__dirname, `data/data.csv`);
+
+      this.logger.info(`Batch size: ${batchSize}`);
+
+      let currentBatch = [];
+
+      const parser = fs.createReadStream(filePath).pipe(
+        parse({
+          columns: true,
+          skip_empty_lines: true,
+          trim: true,
+        }),
+      );
+
+      for await (const record of parser) {
+        if (this.isShuttingDown) {
+          this.logger.info('Stopping processing due to shutdown signal');
+          break;
+        }
+
+        if (!(await this.validateRecord(record))) {
+          this.logger.warn({
+            message: 'Invalid record skipped',
+            record,
+            reason: 'Validation failed',
+          });
+
+          continue;
+        }
+
+        currentBatch.push({
+          index: parseInt(record.index, 10),
+          _id: record.id,
+          url: record.url,
+          thumbnail: null,
+        });
+
+        if (currentBatch.length >= batchSize) {
+          await this.processBatch(currentBatch);
+          currentBatch = [];
+        }
+      }
+
+      // Process any remaining records
+      if (currentBatch.length > 0 && !this.isShuttingDown) {
         await this.processBatch(currentBatch);
-        currentBatch = [];
+      }
+
+      this.logger.info(
+        `Processing completed. Total processed: ${this.processedCount}`,
+      );
+    } finally {
+      if (cleanup) {
+        cleanup();
       }
     }
-
-    // Process any remaining records
-    if (currentBatch.length > 0) {
-      await this.processBatch(currentBatch);
-    }
-
-    this.logger.info(
-      `Processing completed. Total processed: ${this.processedCount}`,
-    );
   }
 
   async validateConnection() {
