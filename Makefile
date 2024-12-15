@@ -6,3 +6,6 @@ preview:
 
 format:
 	@npm run format
+
+build:
+	@npm install
